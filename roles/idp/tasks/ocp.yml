@@ -1,82 +1,89 @@
-- name: Create cluster-admins group
-  kubernetes.core.k8s:
-    kubeconfig: "/tmp/kubeconfig"
-    host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
-    definition:
-      apiVersion: user.openshift.io/v1
-      kind: Group
-      metadata:
-        name: cluster-admins
-      users:
-        "{{ cluster_admins }}"
-    state: present
-    persist_config: false
-    validate_certs: false
-
-- name: Bind cluster-admins group to cluster-admin cluster role
-  kubernetes.core.k8s:
-    kubeconfig: "/tmp/kubeconfig"
-    host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
-    definition:
-      apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRoleBinding
-      metadata:
-        name: cluster-admins-group
-      subjects:
-        - kind: Group
-          apiGroup: rbac.authorization.k8s.io
-          name: cluster-admins
-      roleRef:
-        apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: cluster-admin
-    state: present
-    persist_config: false
-    validate_certs: false
-
-- name: Create htpasswd file
-  ansible.builtin.command: htpasswd -Bbc {{ generated_name }}.htpasswd kubeadmin {{ kubeadmin_password }}
+- name: Initialize htpasswd file
+  ansible.builtin.command:
+    cmd: "touch {{ generated_name }}.htpasswd"
   delegate_to: localhost
 
-- name: Set htpasswd fact
+- name: Create htpasswd file with users
+  ansible.builtin.command:
+    htpasswd -b {{ generated_name }}.htpasswd {{ item.name }} {{ item.pass }}
+  loop: "{{ auth.users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: localhost
+
+- name: Set htpasswd fact for secret creation
   ansible.builtin.set_fact:
     kubeadmin_htpasswd: "{{ lookup('file', './{{ generated_name }}.htpasswd') }}"
 
-- name: Create htpasswd secret
-  kubernetes.core.k8s:
-    kubeconfig: "/tmp/kubeconfig"
-    host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
-    definition:
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: "{{ generated_name }}-htpasswd-secret"
-        namespace: openshift-config
-      type: Opaque
-      data:
-        htpasswd: "{{ kubeadmin_htpasswd|b64encode }}"
-    state: present
-    persist_config: false
-    validate_certs: false
+- name: "Configure HTPasswd - Installing HTPasswd provider"
+  shell: |
+    oc create secret generic {{ generated_name }}-htpasswd-secret --from-file htpasswd=./{{ generated_name }}.htpasswd -n openshift-config
+    true
+  environment:
+    KUBECONFIG: "/tmp/kubeconfig"
 
-- name: Create Google IDP client secret
-  kubernetes.core.k8s:
-    kubeconfig: "/tmp/kubeconfig"
-    host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
-    definition:
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: redhat-google-idp-client-secret
-        namespace: openshift-config
-      type: Opaque
-      data:
-        clientSecret: "{{ redhat_google_idp_client_secret|b64encode }}"
-    state: present
-    persist_config: false
-    validate_certs: false
+# - name: Create htpasswd secret in OpenShift
+#   kubernetes.core.k8s:
+#     kubeconfig: "/tmp/kubeconfig"
+#     host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
+#     definition:
+#       apiVersion: v1
+#       kind: Secret
+#       metadata:
+#         name: "{{ generated_name }}-htpasswd-secret"
+#         namespace: openshift-config
+#       type: Opaque
+#       data:
+#         htpasswd: "{{ kubeadmin_htpasswd | b64encode }}"
+#     state: present
+#     persist_config: false
+#     validate_certs: false
 
-- name: Patch OpenShift OAuth cluster resource
+- name: Create groups and bind them to roles
+  vars:
+    cluster_roles: "{{ dict(auth.groups | map(attribute='name') | zip(auth.groups | map(attribute='clusterRole'))) }}"
+  block:
+    - name: Create group in OpenShift
+      kubernetes.core.k8s:
+        kubeconfig: "/tmp/kubeconfig"
+        host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
+        definition:
+          apiVersion: user.openshift.io/v1
+          kind: Group
+          metadata:
+            name: "{{ item.name }}"
+        state: present
+        persist_config: false
+        validate_certs: false
+      loop: "{{ auth.groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Bind group to the cluster role
+      kubernetes.core.k8s:
+        kubeconfig: "/tmp/kubeconfig"
+        host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ item.name }}-binding"
+          subjects:
+            - kind: Group
+              apiGroup: rbac.authorization.k8s.io
+              name: "{{ item.name }}"
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: "{{ item.clusterRole }}"
+        state: present
+        persist_config: false
+        validate_certs: false
+      loop: "{{ auth.groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+- name: Patch OpenShift OAuth to use htpasswd
   kubernetes.core.k8s:
     kubeconfig: "/tmp/kubeconfig"
     host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
@@ -87,32 +94,12 @@
         name: cluster
       spec:
         identityProviders:
-          - name: RedHat
-            mappingMethod: claim
-            type: Google
-            google:
-              clientID: "{{ redhat_google_idp_client_id }}"
-              clientSecret:
-                name: redhat-google-idp-client-secret
-              hostedDomain: "redhat.com"
-          - name: "{{ oauth_company_name }}"
+          - name: "{{ auth.provider.htpasswd.name }}"
             mappingMethod: claim
             type: HTPasswd
             htpasswd:
               fileData:
                 name: "{{ generated_name }}-htpasswd-secret"
     state: patched
-    persist_config: false
-    validate_certs: false
-
-- name: Delete partner lab default kubeadmin secret
-  kubernetes.core.k8s:
-    kubeconfig: "/tmp/kubeconfig"
-    host: "https://api.{{ generated_name }}.openshiftpartnerlabs.com:6443"
-    api_version: v1
-    kind: Secret
-    name: kubeadmin
-    namespace: kube-system
-    state: absent
     persist_config: false
     validate_certs: false
