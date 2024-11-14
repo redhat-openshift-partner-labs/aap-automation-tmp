@@ -6,6 +6,14 @@
     - vars.yml
   ignore_errors: true
   tasks:
+    - name: Debug
+      debug:
+        var: hostvars[inventory_hostname]
+
+    - name: Check if skip_all_tasks is true
+      meta: end_play
+      when: skip_all_tasks | default(false)
+
     - name: Run init setup
       include_role:
         name: setup

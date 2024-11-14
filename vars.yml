@@ -1,4 +1,5 @@
 ---
+skip_all_tasks: true
 # obtain from the database
 generated_name: "partner-labs-devs"
 # obtain from the database
