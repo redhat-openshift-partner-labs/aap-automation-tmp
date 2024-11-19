@@ -18,6 +18,10 @@
       debug:
         var: cluster_info
 
+    - name: Pause for troubleshooting
+      pause:
+        minutes: 5
+
     - name: Check if skip_all_tasks is true
       meta: end_play
       when: skip_all_tasks | default(false)
