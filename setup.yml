@@ -6,9 +6,17 @@
     - vars.yml
   ignore_errors: true
   tasks:
-    - name: Debug
+    - name: Debug cluster_deployment
       debug:
-        var: hostvars[inventory_hostname]
+        var: cluster_deployment
+
+    - name: Debug install_config
+      debug:
+        var: install_config
+
+    - name: Debug cluster_info
+      debug:
+        var: cluster_info
 
     - name: Check if skip_all_tasks is true
       meta: end_play
